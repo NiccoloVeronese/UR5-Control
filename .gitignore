@@ -1,0 +1,26 @@
+# MuJoCo Menagerie model (downloaded automatically at runtime)
+mujoco_menagerie/
+
+# Generated plot
+traiettoria_ur5.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
