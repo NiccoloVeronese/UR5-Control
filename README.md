@@ -10,14 +10,13 @@ The controller is a **Cartesian-space PID** coupled with a **Jacobian-based IK**
 
 ```
 ==================================================
-  UR5e — Seleziona il piano della traiettoria
+  UR5e — Select Trajectory Plane
 ==================================================
-  [1]  Piano XY  (movimento orizzontale)
-  [2]  Piano XZ  (movimento verticale frontale)
-  [3]  Piano YZ  (movimento verticale laterale)
+  [1]  XY Plane  (horizontal motion)
+  [2]  XZ Plane  (vertical frontal motion)
+  [3]  YZ Plane  (vertical lateral motion)
 ==================================================
-  Scelta [1/2/3]: 2
-```
+  Selection [1/2/3]:
 
 The MuJoCo viewer opens in real-time. Close it to generate the plot.
 
