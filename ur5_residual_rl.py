@@ -1,14 +1,19 @@
 """
 UR5e Residual RL — PID + SAC
 ==============================
-- Training: NESSUN viewer, massima velocità
-- Demo finale: viewer aperto per vedere il risultato
-- Baseline: solo PID, per confronto diretto
+Control architecture: v_cart_total = v_pid(t) + RL_ALPHA * v_rl(obs)
 
-Requisiti:
+The PID handles the main tracking task (unchanged from the baseline).
+The SAC agent learns to correct the residual errors that the PID cannot eliminate.
+
+- Training : no viewer, maximum speed
+- Demo     : opens the MuJoCo viewer to visualise the trained policy
+- Baseline : PID only, for direct comparison
+
+Requirements:
     pip install mujoco numpy matplotlib torch
 
-Utilizzo:
+Usage:
     python ur5_residual_rl.py
 """
 
@@ -27,7 +32,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 # ─────────────────────────────────────────────────────────────
-# 1. Download modello UR5e
+# 1. Download UR5e model
 # ─────────────────────────────────────────────────────────────
 
 MODEL_DIR = "mujoco_menagerie"
@@ -36,69 +41,70 @@ UR5_XML   = os.path.join(MODEL_DIR, "mujoco_menagerie-main",
 
 def download_ur5_model():
     if os.path.exists(UR5_XML):
-        print("Modello UR5e già presente.")
+        print("UR5e model already present.")
         return
     url = ("https://github.com/google-deepmind/mujoco_menagerie/"
            "archive/refs/heads/main.zip")
-    print("Scaricamento modello UR5e...")
+    print("Downloading UR5e model...")
     os.makedirs(MODEL_DIR, exist_ok=True)
     zip_path = os.path.join(MODEL_DIR, "menagerie.zip")
     urllib.request.urlretrieve(url, zip_path)
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(MODEL_DIR)
     os.remove(zip_path)
-    print("Modello pronto.\n")
+    print("Model ready.\n")
 
 # ─────────────────────────────────────────────────────────────
-# 2. Parametri
+# 2. Parameters
 # ─────────────────────────────────────────────────────────────
 
+# Trajectory
 CIRCLE_RADIUS    = 0.15
 CIRCLE_CENTER    = np.array([0.4, 0.0, 0.5])
-CIRCLE_FREQUENCY = 0.2
+CIRCLE_FREQUENCY = 0.2                        # [Hz]
 
-# PID (invariati)
-KP            = 50.0
-KI            = 5.0
-KD            = 2.0
-LAMBDA_DLS    = 5e-3
-MAX_JOINT_VEL = 2.0
-I_CLAMP       = 0.05
+# PID gains (identical to the baseline script)
+KP            = 50.0    # proportional gain
+KI            = 5.0     # integral gain
+KD            = 2.0     # derivative gain
+LAMBDA_DLS    = 5e-3    # Damped Least Squares damping factor
+MAX_JOINT_VEL = 2.0     # joint velocity saturation limit [rad/s]
+I_CLAMP       = 0.05    # anti-windup clamp on the integral term [m]
 
 # Residual RL
-RL_ALPHA      = 0.3    # peso correzione RL
-RL_ACTION_MAX = 0.2    # [m/s] max correzione cartesiana
+RL_ALPHA      = 0.3     # weight of the RL correction (0 = PID only, 1 = RL only)
+RL_ACTION_MAX = 0.2     # maximum RL Cartesian velocity correction [m/s]
 
-# Dimensioni
-OBS_DIM = 8
-ACT_DIM = 3
+# Observation / action dimensions
+OBS_DIM = 8   # [pos_error(3), vel_error(3), sin(phase), cos(phase)]
+ACT_DIM = 3   # Cartesian velocity correction [vx, vy, vz]
 
-# Training (senza viewer → molto più veloce)
-# dt del modello UR5e Menagerie ≈ 0.002 s
-# → 1 giro completo = 1/0.2 Hz = 5 s = ~2500 step
-# → aggiungiamo ~1000 step di transiente iniziale
-MAX_EPISODE_STEPS = 5000   # ~10 s di simulazione (2+ giri completi)
-WARMUP_STEPS      = 800    # step iniziali: solo PID avvicina l'EE al cerchio
-                           # (RL non agisce e non impara durante il warmup)
-TOTAL_EPISODES    = 300    # episodi totali di training
-UPDATE_EVERY      = 10     # gradient update ogni N step (velocizza)
-PRINT_EVERY       = 10     # stampa progress ogni N episodi
+# Episode and training settings
+# UR5e Menagerie timestep ≈ 0.002 s
+# One full circle = 1 / 0.2 Hz = 5 s ≈ 2500 steps
+# WARMUP_STEPS: PID brings the EE close to the circle before RL starts acting
+MAX_EPISODE_STEPS = 5000   # ~10 s of simulation (2+ full circles)
+WARMUP_STEPS      = 800    # initial steps where only the PID acts (no RL)
+TOTAL_EPISODES    = 300    # total training episodes
+UPDATE_EVERY      = 10     # perform one gradient update every N simulation steps
+PRINT_EVERY       = 10     # print progress every N episodes
 
-# SAC
+# SAC hyperparameters
 LR_ACTOR     = 3e-4
 LR_CRITIC    = 3e-4
-LR_ALPHA_ENT = 3e-4
+LR_ALPHA_ENT = 3e-4   # adaptive entropy temperature learning rate
 GAMMA        = 0.99
-TAU          = 0.005
+TAU          = 0.005  # soft update coefficient for the target critic
 BUFFER_SIZE  = 100_000
 BATCH_SIZE   = 256
-LEARN_START  = 1_000
+LEARN_START  = 1_000  # minimum buffer size before gradient updates begin
 
 # ─────────────────────────────────────────────────────────────
-# 3. Funzioni MuJoCo
+# 3. MuJoCo helper functions
 # ─────────────────────────────────────────────────────────────
 
 def circle_target(t: float, plane: str):
+    """Return desired Cartesian position and velocity on the circle at time t."""
     omega = 2.0 * np.pi * CIRCLE_FREQUENCY
     a     = omega * t
     if plane == "xy":
@@ -107,21 +113,33 @@ def circle_target(t: float, plane: str):
     elif plane == "xz":
         p = CIRCLE_CENTER + np.array([ CIRCLE_RADIUS*np.cos(a), 0.0,  CIRCLE_RADIUS*np.sin(a)])
         v = np.array([-CIRCLE_RADIUS*omega*np.sin(a), 0.0,  CIRCLE_RADIUS*omega*np.cos(a)])
-    else:
+    else:  # yz
         p = CIRCLE_CENTER + np.array([0.0,  CIRCLE_RADIUS*np.cos(a),  CIRCLE_RADIUS*np.sin(a)])
         v = np.array([0.0, -CIRCLE_RADIUS*omega*np.sin(a),  CIRCLE_RADIUS*omega*np.cos(a)])
     return p, v
 
+
 def get_jacobian(model, data, site_id, nq):
+    """Compute the 3xnq translational Jacobian for the end-effector site."""
     jacp = np.zeros((3, model.nv))
     mujoco.mj_jacSite(model, data, jacp, None, site_id)
     return jacp[:, :nq]
 
+
 def dls_pinv(J, lam=LAMBDA_DLS):
+    """Damped Least Squares pseudo-inverse: J+ = J^T (J J^T + lam^2 I)^-1"""
     m = J.shape[0]
     return J.T @ np.linalg.inv(J @ J.T + lam**2 * np.eye(m))
 
+
 def make_obs(err, prev_err, dt, t):
+    """
+    Build the RL observation vector (8,):
+        [pos_error_x/y/z, vel_error_x/y/z, sin(omega*t), cos(omega*t)]
+    Errors are clipped to [-0.5, 0.5] m to keep the input bounded.
+    The sin/cos encoding gives the agent information about the phase
+    of the circular trajectory without wrapping issues.
+    """
     omega = 2.0 * np.pi * CIRCLE_FREQUENCY
     d_err = (err - prev_err) / dt
     return np.array([
@@ -132,7 +150,7 @@ def make_obs(err, prev_err, dt, t):
     ], dtype=np.float32)
 
 # ─────────────────────────────────────────────────────────────
-# 4. SAC — reti neurali
+# 4. SAC neural networks
 # ─────────────────────────────────────────────────────────────
 
 class MLP(nn.Module):
@@ -145,8 +163,11 @@ class MLP(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
+
 class Actor(nn.Module):
+    """Gaussian stochastic policy with tanh squashing (SAC reparametrisation trick)."""
     LOG_STD_MIN, LOG_STD_MAX = -5, 2
+
     def __init__(self, obs_dim, act_dim, hidden=128):
         super().__init__()
         self.shared = nn.Sequential(
@@ -166,24 +187,28 @@ class Actor(nn.Module):
         mu, log_std = self(obs)
         std  = log_std.exp()
         dist = torch.distributions.Normal(mu, std)
-        x_t  = dist.rsample()
+        x_t  = dist.rsample()                          # reparametrisation
         y_t  = torch.tanh(x_t)
-        act  = y_t * RL_ACTION_MAX
+        act  = y_t * RL_ACTION_MAX                     # scale to action range
+        # log-prob corrected for the tanh squashing
         log_prob = dist.log_prob(x_t) \
                  - torch.log(RL_ACTION_MAX * (1 - y_t.pow(2)) + 1e-6)
         return act, log_prob.sum(-1, keepdim=True)
 
+
 class TwinCritic(nn.Module):
+    """Two independent Q-networks to prevent overestimation (clipped double-Q)."""
     def __init__(self, obs_dim, act_dim, hidden=128):
         super().__init__()
         self.q1 = MLP(obs_dim + act_dim, 1, hidden)
         self.q2 = MLP(obs_dim + act_dim, 1, hidden)
+
     def forward(self, obs, act):
         x = torch.cat([obs, act], dim=-1)
         return self.q1(x), self.q2(x)
 
 # ─────────────────────────────────────────────────────────────
-# 5. Replay Buffer
+# 5. Replay buffer
 # ─────────────────────────────────────────────────────────────
 
 class ReplayBuffer:
@@ -203,7 +228,7 @@ class ReplayBuffer:
     def __len__(self): return len(self.buf)
 
 # ─────────────────────────────────────────────────────────────
-# 6. Agente SAC
+# 6. SAC agent
 # ─────────────────────────────────────────────────────────────
 
 class SACAgent:
@@ -219,6 +244,7 @@ class SACAgent:
         self.opt_actor  = optim.Adam(self.actor.parameters(),  lr=LR_ACTOR)
         self.opt_critic = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
 
+        # Adaptive entropy: target = -dim(action)
         self.target_entropy = -float(ACT_DIM)
         self.log_alpha_ent  = torch.zeros(1, requires_grad=True, device=self.device)
         self.opt_alpha      = optim.Adam([self.log_alpha_ent], lr=LR_ALPHA_ENT)
@@ -252,6 +278,7 @@ class SACAgent:
         rew  = rew.to(self.device);  nobs = nobs.to(self.device)
         done = done.to(self.device)
 
+        # Critic update
         with torch.no_grad():
             next_act, next_log_pi = self.actor.sample(nobs)
             q1_t, q2_t = self.critic_target(nobs, next_act)
@@ -262,42 +289,59 @@ class SACAgent:
         critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
         self.opt_critic.zero_grad(); critic_loss.backward(); self.opt_critic.step()
 
+        # Actor update
         new_act, log_pi = self.actor.sample(obs)
         q1_new, q2_new  = self.critic(obs, new_act)
         actor_loss = (self.alpha_ent * log_pi - torch.min(q1_new, q2_new)).mean()
         self.opt_actor.zero_grad(); actor_loss.backward(); self.opt_actor.step()
 
+        # Entropy temperature update
         alpha_loss = -(self.log_alpha_ent * (log_pi + self.target_entropy).detach()).mean()
         self.opt_alpha.zero_grad(); alpha_loss.backward(); self.opt_alpha.step()
 
+        # Soft update of the target critic
         for p, p_t in zip(self.critic.parameters(), self.critic_target.parameters()):
             p_t.data.copy_(TAU * p.data + (1 - TAU) * p_t.data)
 
     def save(self, path="ur5_sac_residual.pt"):
         torch.save({"actor": self.actor.state_dict(),
                     "critic": self.critic.state_dict()}, path)
-        print(f"  Checkpoint salvato: {path}")
+        print(f"  Checkpoint saved: {path}")
 
     def load(self, path="ur5_sac_residual.pt"):
         ck = torch.load(path, map_location=self.device)
         self.actor.load_state_dict(ck["actor"])
         self.critic.load_state_dict(ck["critic"])
-        print(f"Modello caricato: {path}")
+        print(f"Model loaded: {path}")
 
 # ─────────────────────────────────────────────────────────────
-# 7. Episodio di simulazione (senza viewer = veloce)
+# 7. Simulation episode
 # ─────────────────────────────────────────────────────────────
 
 def run_episode(model_mj, data, ee_id, nq, dt, plane,
                 agent, explore=True, viewer=None):
+    """
+    Run one full episode and return (total_reward, mean_error_m, log_dict).
+
+    Warmup phase (first WARMUP_STEPS steps):
+        Only the PID acts. The RL agent does not observe, act, or learn.
+        This lets the PID bring the end-effector close to the circle
+        before RL training data is collected, avoiding large transient
+        errors that would confuse the agent.
+
+    RL phase (remaining steps):
+        v_cart = v_pid + RL_ALPHA * v_rl
+        Transitions are stored and gradient updates are performed every
+        UPDATE_EVERY steps.
+    """
     mujoco.mj_resetData(model_mj, data)
     q_home = np.array([0.0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0.0])
     data.qpos[:nq] = q_home
     mujoco.mj_forward(model_mj, data)
 
-    integral = np.zeros(3)
-    prev_err = np.zeros(3)
-    log      = {"t": [], "ee": [], "target": [], "error": []}
+    integral     = np.zeros(3)
+    prev_err     = np.zeros(3)
+    log          = {"t": [], "ee": [], "target": [], "error": []}
     total_reward = 0.0
     errors       = []
 
@@ -306,7 +350,7 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
         mujoco.mj_forward(model_mj, data)
         ee_pos = data.site_xpos[ee_id].copy()
 
-        # PID
+        # PID Cartesian velocity command
         pos_d, vel_d = circle_target(t, plane)
         err           = pos_d - ee_pos
         integral     += err * dt
@@ -314,8 +358,7 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
         d_err_pid     = (err - prev_err) / dt
         v_pid         = vel_d + KP * err + KI * integral + KD * d_err_pid
 
-        # Warmup: i primi WARMUP_STEPS il PID porta l EE vicino al cerchio.
-        # L agente RL non agisce e non impara (evita dati spuri dal transiente).
+        # Warmup: PID only — RL agent is silent
         in_warmup = (step < WARMUP_STEPS)
         obs       = make_obs(err, prev_err, dt, t)
         if in_warmup:
@@ -324,7 +367,7 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
             action_rl = agent.select_action(obs, explore=explore)
         v_cart = v_pid + (0.0 if in_warmup else RL_ALPHA) * action_rl
 
-        # IK
+        # Jacobian IK: map Cartesian velocity to joint velocities
         J     = get_jacobian(model_mj, data, ee_id, nq)
         J_inv = dls_pinv(J)
         dq    = J_inv @ v_cart
@@ -332,14 +375,14 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
         if norm > MAX_JOINT_VEL:
             dq *= MAX_JOINT_VEL / norm
 
-        # Step simulazione
+        # Simulation step
         data.qpos[:nq] += dq * dt
         data.qvel[:nq]  = dq
         mujoco.mj_step(model_mj, data)
         if viewer is not None:
             viewer.sync()
 
-        # Transizione RL (solo fuori dal warmup)
+        # RL transition and update (only outside warmup)
         pos_error = np.linalg.norm(err)
         if not in_warmup:
             ee_new       = data.site_xpos[ee_id].copy()
@@ -348,8 +391,8 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
             next_obs     = make_obs(err_new, err, dt, data.time)
 
             reward = (- pos_error
-                      - 0.01 * float(np.dot(action_rl, action_rl))
-                      + (0.5 if pos_error < 0.005 else 0.0))
+                      - 0.01 * float(np.dot(action_rl, action_rl))  # action smoothness
+                      + (0.5 if pos_error < 0.005 else 0.0))        # precision bonus
 
             done = float(step == MAX_EPISODE_STEPS - 1)
             agent.store(obs, action_rl, reward, next_obs, done)
@@ -370,12 +413,12 @@ def run_episode(model_mj, data, ee_id, nq, dt, plane,
     return total_reward, np.mean(errors), log
 
 # ─────────────────────────────────────────────────────────────
-# 8. Demo con viewer (dopo il training)
+# 8. Demo with viewer (after training)
 # ─────────────────────────────────────────────────────────────
 
 def run_demo(model_mj, data, ee_id, nq, dt, plane, agent):
-    """Apre il viewer e fa girare la policy allenata in loop."""
-    print("\nViewer aperto — premi Ctrl+C o chiudi la finestra per fermare.\n")
+    """Open the MuJoCo viewer and run the trained policy in a loop."""
+    print("\nViewer open — press Ctrl+C or close the window to stop.\n")
     with mujoco.viewer.launch_passive(model_mj, data) as viewer:
         viewer.cam.lookat[:]  = [0.3, 0.0, 0.4]
         viewer.cam.distance   = 1.8
@@ -385,37 +428,37 @@ def run_demo(model_mj, data, ee_id, nq, dt, plane, agent):
         ep = 0
         while viewer.is_running():
             ep += 1
-            print(f"[Demo ep {ep}]")
+            print(f"[Demo episode {ep}]")
             tot_r, mean_err, log = run_episode(
                 model_mj, data, ee_id, nq, dt, plane,
                 agent, explore=False, viewer=viewer
             )
-            print(f"  Reward={tot_r:.1f}  Errore medio={mean_err*1000:.2f} mm")
+            print(f"  Reward={tot_r:.1f}  Mean error={mean_err*1000:.2f} mm")
 
     return log
 
 # ─────────────────────────────────────────────────────────────
-# 9. Plot
+# 9. Plots
 # ─────────────────────────────────────────────────────────────
 
 def plot_comparison(log_pid, log_rl, plane, reward_hist, error_hist):
-    """Mostra PID baseline vs PID+RL affiancati + curva apprendimento."""
+    """Side-by-side comparison: PID baseline vs PID+RL, plus learning curve."""
 
     fig = plt.figure(figsize=(20, 5))
-    fig.suptitle(f"UR5e — Confronto PID vs Residual RL  (piano {plane.upper()})",
+    fig.suptitle(f"UR5e — PID vs Residual RL  ({plane.upper()} plane)",
                  fontsize=13, fontweight="bold")
 
-    # ── Traiettoria PID ───────────────────────────────────────
+    # PID-only trajectory
     ax1 = fig.add_subplot(1, 4, 1, projection="3d")
     ee_pid  = np.array(log_pid["ee"])
     tgt_pid = np.array(log_pid["target"])
     ax1.plot(tgt_pid[:,0], tgt_pid[:,1], tgt_pid[:,2], "b--", lw=1.5, label="Target")
     ax1.plot(ee_pid[:,0],  ee_pid[:,1],  ee_pid[:,2],  "r-",  lw=1.5, label="EE")
-    ax1.set_title("Solo PID"); ax1.legend(fontsize=8)
+    ax1.set_title("PID only"); ax1.legend(fontsize=8)
     ax1.set_xlabel("X"); ax1.set_ylabel("Y"); ax1.set_zlabel("Z")
     _set_equal_axes(ax1, ee_pid, tgt_pid)
 
-    # ── Traiettoria PID+RL ────────────────────────────────────
+    # PID+RL trajectory
     ax2 = fig.add_subplot(1, 4, 2, projection="3d")
     ee_rl  = np.array(log_rl["ee"])
     tgt_rl = np.array(log_rl["target"])
@@ -425,38 +468,39 @@ def plot_comparison(log_pid, log_rl, plane, reward_hist, error_hist):
     ax2.set_xlabel("X"); ax2.set_ylabel("Y"); ax2.set_zlabel("Z")
     _set_equal_axes(ax2, ee_rl, tgt_rl)
 
-    # ── Errore nel tempo: confronto ───────────────────────────
+    # Tracking error comparison
     ax3 = fig.add_subplot(1, 4, 3)
     t_pid = np.array(log_pid["t"])
     t_rl  = np.array(log_rl["t"])
     e_pid = np.array(log_pid["error"]) * 1000
     e_rl  = np.array(log_rl["error"])  * 1000
-    ax3.plot(t_pid, e_pid, color="tomato",   lw=1.2, label=f"Solo PID  (media: {e_pid.mean():.1f} mm)")
-    ax3.plot(t_rl,  e_rl,  color="seagreen", lw=1.2, label=f"PID + RL  (media: {e_rl.mean():.1f} mm)")
-    ax3.set_xlabel("Tempo [s]"); ax3.set_ylabel("Errore [mm]")
-    ax3.set_title("Errore tracking — confronto")
+    ax3.plot(t_pid, e_pid, color="tomato",   lw=1.2, label=f"PID only  (mean: {e_pid.mean():.1f} mm)")
+    ax3.plot(t_rl,  e_rl,  color="seagreen", lw=1.2, label=f"PID + RL  (mean: {e_rl.mean():.1f} mm)")
+    ax3.set_xlabel("Time [s]"); ax3.set_ylabel("Error [mm]")
+    ax3.set_title("Tracking error — comparison")
     ax3.legend(fontsize=9); ax3.grid(True, alpha=0.4)
 
-    # ── Curva di apprendimento ────────────────────────────────
+    # Learning curve
     ax4  = fig.add_subplot(1, 4, 4)
     ax4b = ax4.twinx()
     eps  = range(1, len(reward_hist) + 1)
     ax4.plot(eps,  reward_hist, color="steelblue", lw=1.2, label="Reward")
-    ax4b.plot(eps, error_hist,  color="coral",     lw=1.2, ls="--", label="Errore [mm]")
-    ax4.set_xlabel("Episodio")
-    ax4.set_ylabel("Reward cumulativo", color="steelblue")
-    ax4b.set_ylabel("Errore medio [mm]", color="coral")
-    ax4.set_title("Curva di apprendimento")
+    ax4b.plot(eps, error_hist,  color="coral",     lw=1.2, ls="--", label="Error [mm]")
+    ax4.set_xlabel("Episode")
+    ax4.set_ylabel("Cumulative reward", color="steelblue")
+    ax4b.set_ylabel("Mean error [mm]", color="coral")
+    ax4.set_title("Learning curve")
     l1, lb1 = ax4.get_legend_handles_labels()
     l2, lb2 = ax4b.get_legend_handles_labels()
     ax4.legend(l1+l2, lb1+lb2, fontsize=8)
     ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "confronto_rl_pid.png")
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comparison_rl_pid.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
-    print(f"Grafico salvato: {out}")
+    print(f"Plot saved: {out}")
     plt.show()
+
 
 def _set_equal_axes(ax, *point_arrays):
     pts = np.vstack(point_arrays)
@@ -467,31 +511,32 @@ def _set_equal_axes(ax, *point_arrays):
     ax.set_zlim(mid[2]-rng, mid[2]+rng)
 
 # ─────────────────────────────────────────────────────────────
-# 10. Menu
+# 10. Interactive menus
 # ─────────────────────────────────────────────────────────────
 
 def ask_plane():
     print("\n" + "="*50)
-    print("  UR5e — Piano della traiettoria")
+    print("  UR5e — Select trajectory plane")
     print("="*50)
     print("  [1]  XY   [2]  XZ   [3]  YZ")
     print("="*50)
     while True:
-        c = input("  Scelta [1/2/3]: ").strip()
+        c = input("  Choice [1/2/3]: ").strip()
         if c == "1": return "xy"
         if c == "2": return "xz"
         if c == "3": return "yz"
 
+
 def ask_mode():
     print("\n" + "="*50)
-    print("  Modalità")
+    print("  Mode")
     print("="*50)
-    print("  [1]  Train  — allena SAC (senza viewer, veloce)")
-    print("  [2]  Demo   — carica modello e apre il viewer")
-    print("  [3]  Baseline — solo PID con viewer")
+    print("  [1]  Train    — train the SAC agent (no viewer, fast)")
+    print("  [2]  Demo     — load saved model and open viewer")
+    print("  [3]  Baseline — PID only with viewer")
     print("="*50)
     while True:
-        c = input("  Scelta [1/2/3]: ").strip()
+        c = input("  Choice [1/2/3]: ").strip()
         if c in ("1","2","3"): return c
 
 # ─────────────────────────────────────────────────────────────
@@ -516,41 +561,59 @@ def main():
     SAVE_PATH = "ur5_sac_residual.pt"
     agent     = SACAgent()
 
-    # ── 1. TRAINING (nessun viewer) ──────────────────────────
+    # ── Mode 1: Training (no viewer) ────────────────────────
     if mode == "1":
-        print(f"\n{'='*50}")
-        print(f"  TRAINING — {TOTAL_EPISODES} episodi  (nessun viewer)")
-        print(f"  Update ogni {UPDATE_EVERY} step  |  Reti: 128 neuroni")
-        print(f"{'='*50}\n")
+        print(f"\n{'='*56}")
+        print(f"  TRAINING — {TOTAL_EPISODES} episodes  (no viewer)")
+        print(f"  Warmup per episode: {WARMUP_STEPS} steps  |  RL steps: {MAX_EPISODE_STEPS - WARMUP_STEPS}")
+        print(f"{'='*56}\n")
 
         reward_hist, error_hist = [], []
         t0 = time.time()
 
         for ep in range(1, TOTAL_EPISODES + 1):
+            t_ep = time.time()
             tot_r, mean_err, log = run_episode(
                 model_mj, data, ee_id, nq, dt, plane,
-                agent, explore=True, viewer=None        # <── nessun viewer
+                agent, explore=True, viewer=None
             )
             reward_hist.append(tot_r)
             error_hist.append(mean_err * 1000)
 
+            # Progress bar
+            elapsed = time.time() - t0
+            eta     = elapsed / ep * (TOTAL_EPISODES - ep)
+            pct     = ep / TOTAL_EPISODES
+            bar_len = 30
+            filled  = int(bar_len * pct)
+            bar     = "█" * filled + "░" * (bar_len - filled)
+            ep_time = time.time() - t_ep
+
+            phase = "COLLECTING DATA" if len(agent.buffer) < LEARN_START else "TRAINING RL    "
+
+            print(f"\r[{bar}] {ep:3d}/{TOTAL_EPISODES}  {phase}"
+                  f"  Error={mean_err*1000:5.1f}mm"
+                  f"  ETA={eta/60:4.1f}min"
+                  f"  ({ep_time:.1f}s/ep)",
+                  end="", flush=True)
+
             if ep % PRINT_EVERY == 0:
-                elapsed = time.time() - t0
-                eta     = elapsed / ep * (TOTAL_EPISODES - ep)
-                print(f"[Ep {ep:3d}/{TOTAL_EPISODES}]  "
-                      f"Reward={tot_r:8.1f}  "
-                      f"Errore={mean_err*1000:5.2f} mm  "
-                      f"Buffer={len(agent.buffer):6d}  "
-                      f"ETA={eta/60:.1f} min")
+                print()  # newline every N episodes for readability
 
             if ep % 50 == 0:
+                print(f"\n  >>> Checkpoint saved (ep {ep})")
                 agent.save(SAVE_PATH)
 
-        agent.save(SAVE_PATH)
-        print(f"\nTraining completato in {(time.time()-t0)/60:.1f} min.")
+        print(f"\n\n{'='*56}")
+        print(f"  TRAINING COMPLETE — {(time.time()-t0)/60:.1f} min")
+        print(f"  Final error: {error_hist[-1]:.1f} mm")
+        print(f"{'='*56}\n")
 
-        # Baseline PID (agente muto, nessun viewer)
-        print("\nCalcolo baseline PID per confronto...")
+        agent.save(SAVE_PATH)
+
+        # PID baseline run (silent agent, no viewer)
+        print("Running PID-only baseline for comparison...")
+
         class DummyAgent:
             total_steps = 0
             def select_action(self, obs, explore=False): return np.zeros(ACT_DIM, np.float32)
@@ -560,23 +623,23 @@ def main():
         _, _, log_pid = run_episode(model_mj, data, ee_id, nq, dt, plane,
                                     DummyAgent(), explore=False, viewer=None)
 
-        # Demo con viewer — risultato finale
-        print("\nOra apro il viewer per mostrare il risultato allenato...")
+        # Open viewer to show the trained result
+        print("\nOpening viewer to display the trained policy...")
         log_rl = run_demo(model_mj, data, ee_id, nq, dt, plane, agent)
 
         plot_comparison(log_pid, log_rl, plane, reward_hist, error_hist)
 
-    # ── 2. DEMO (carica modello, apre viewer) ────────────────
+    # ── Mode 2: Demo (load model, open viewer) ───────────────
     elif mode == "2":
         if not os.path.exists(SAVE_PATH):
-            print(f"Errore: '{SAVE_PATH}' non trovato. Esegui prima il training.")
+            print(f"Error: '{SAVE_PATH}' not found. Run training first.")
             return
         agent.load(SAVE_PATH)
         run_demo(model_mj, data, ee_id, nq, dt, plane, agent)
 
-    # ── 3. BASELINE PID (viewer + plot) ─────────────────────
+    # ── Mode 3: PID baseline (viewer + plot) ─────────────────
     else:
-        print(f"\nBaseline PID puro su piano {plane.upper()}...")
+        print(f"\nPID baseline on {plane.upper()} plane...")
 
         class DummyAgent:
             total_steps = 0
@@ -594,27 +657,27 @@ def main():
                 DummyAgent(), explore=False, viewer=viewer
             )
 
-        print(f"\nPID baseline — Errore medio: {mean_err*1000:.2f} mm")
+        print(f"\nPID baseline — Mean error: {mean_err*1000:.2f} mm")
 
-        # Plot semplice solo PID
         times     = np.array(log["t"])
         ee_pos    = np.array(log["ee"])
         tgt_pos   = np.array(log["target"])
         errors_mm = np.array(log["error"]) * 1000
 
         fig = plt.figure(figsize=(12, 5))
-        fig.suptitle(f"UR5e — Baseline PID  (piano {plane.upper()})", fontsize=13)
+        fig.suptitle(f"UR5e — PID Baseline  ({plane.upper()} plane)", fontsize=13)
         ax3d = fig.add_subplot(1, 2, 1, projection="3d")
         ax3d.plot(tgt_pos[:,0], tgt_pos[:,1], tgt_pos[:,2], "b--", lw=1.5, label="Target")
         ax3d.plot(ee_pos[:,0],  ee_pos[:,1],  ee_pos[:,2],  "r-",  lw=1.5, label="EE")
-        ax3d.set_title("Traiettoria 3D"); ax3d.legend()
+        ax3d.set_title("3D Trajectory"); ax3d.legend()
         _set_equal_axes(ax3d, ee_pos, tgt_pos)
         ax_e = fig.add_subplot(1, 2, 2)
         ax_e.plot(times, errors_mm, color="tomato")
-        ax_e.axhline(errors_mm[len(errors_mm)//2:].mean(), color="navy",
-                     ls="--", label=f"Media: {errors_mm[len(errors_mm)//2:].mean():.1f} mm")
-        ax_e.set_xlabel("Tempo [s]"); ax_e.set_ylabel("Errore [mm]")
-        ax_e.set_title("Errore tracking"); ax_e.legend(); ax_e.grid(alpha=0.4)
+        mean_ss = errors_mm[len(errors_mm)//2:].mean()
+        ax_e.axhline(mean_ss, color="navy", ls="--",
+                     label=f"Steady-state mean: {mean_ss:.1f} mm")
+        ax_e.set_xlabel("Time [s]"); ax_e.set_ylabel("Error [mm]")
+        ax_e.set_title("Tracking error"); ax_e.legend(); ax_e.grid(alpha=0.4)
         plt.tight_layout()
         plt.savefig("baseline_pid.png", dpi=150)
         plt.show()
