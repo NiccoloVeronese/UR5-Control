@@ -1,143 +1,168 @@
-# UR5e Circular Trajectory Control — MuJoCo
+# UR5e 3D End-Effector Trajectory Tracking
 
-Control the **Universal Robots UR5e** robot arm in [MuJoCo](https://mujoco.org/) so that its end-effector tracks a **circular trajectory** in the plane of your choice (XY, XZ, or YZ).
-
-The controller is a **Cartesian-space PID** coupled with a **Jacobian-based IK** (Damped Least Squares pseudo-inverse). At the end of every simulation run a plot is generated showing the real vs. target trajectory and the tracking error over time.
+> Three  approaches to smooth trajectory tracking on a UR5e 6-DOF arm in MuJoCo, from classical control to residual reinforcement learning.
 
 ---
 
-## Demo
+## The Core Problem
+
+Trajectory tracking is harder than point reaching. The end-effector must not just *arrive* at a target, it must continuously follow a moving reference with minimal lag, overshoot, and jitter. This project explores three approaches of increasing sophistication, each building on the limitations of the last.
+
+---
+
+## Three Approaches
+
+### Approach 1 — PID + Jacobian IK [`ur5_circular_trajectory.py`](ur5_circular_trajectory.py)
+
+A classical control baseline. A Cartesian-space PID outputs a desired velocity, which is mapped to joint velocities via a Damped Least Squares Jacobian pseudo-inverse:
 
 ```
-==================================================
-  UR5e — Select Trajectory Plane
-==================================================
-  [1]  XY Plane  (horizontal motion)
-  [2]  XZ Plane  (vertical frontal motion)
-  [3]  YZ Plane  (vertical lateral motion)
-==================================================
-  Selection [1/2/3]:
+v_cart = v_desired + Kp·e + Ki·∫e dt + Kd·ė
+dq     = J†(q) · v_cart          (DLS pseudo-inverse)
+```
 
-The MuJoCo viewer opens in real-time. Close it to generate the plot.
+**Strengths:** No training required, interpretable, numerically stable near singularities (DLS handles them gracefully), real-time capable.
 
----
+**Limitations:** Fixed gains — performance degrades at higher frequencies. Integral windup even with clamping. Cannot adapt to model mismatch or unmodelled dynamics.
 
-## Features
-
-- Real-time 3D viewer via `mujoco.viewer`
-- Interactive menu to select the trajectory plane at startup
-- PID controller in Cartesian space with anti-windup
-- Damped Least Squares (DLS) pseudo-inverse to handle kinematic singularities
-- Joint velocity saturation
-- End-of-simulation plot: 3D trajectory + tracking error [mm] over time
-- Plot saved automatically as `traiettoria_ur5.png`
+Run it:
+```bash
+python ur5_circular_trajectory.py
+# Interactive menu: select XY / XZ / YZ plane
+```
 
 ---
 
-## Requirements
+### Approach 2 — PID + Residual SAC [`ur5_residual_rl.py`](ur5_residual_rl.py)
 
-| Dependency   | Tested version |
-|--------------|---------------|
-| Python       | 3.11          |
-| mujoco       | ≥ 3.0         |
-| numpy        | ≥ 1.23        |
-| matplotlib   | ≥ 3.7         |
+The key insight motivating this approach: **pure RL from scratch on a 6-DOF arm is a hard exploration problem**. Instead of replacing the PID, a SAC agent learns to *correct* the residual errors the PID cannot eliminate:
 
-The UR5e model is downloaded automatically from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) on first run — no manual download needed.
+```
+v_cart = v_pid(t)  +  α · v_rl(observation)
+```
+
+where `α = 0.3` controls how much authority the RL agent has. This architecture:
+- Provides a warm start — the PID already gets the arm near the circle
+- Narrows the learning problem to residual correction (small action space)
+- Guarantees graceful degradation: if RL fails, the PID still tracks
+
+The agent observes `[pos_error(3), vel_error(3), sin(ωt), cos(ωt)]` — an 8-dimensional state focused on what matters for correction. A warmup of 800 steps per episode lets the PID stabilise before RL starts collecting data, preventing large transient errors from corrupting the replay buffer.
+
+Run it:
+```bash
+python ur5_residual_rl.py
+# Mode [1] Train  — 300 episodes, no viewer, fast
+# Mode [2] Demo   — load saved policy, open viewer
+# Mode [3] Baseline — PID only with viewer, for comparison
+```
+
+---
+
+### Approach 3 — Full RL (SAC, Gymnasium env) [`envs/ur5e_env.py`](envs/ur5e_env.py) + [`train_ur5e.py`](train_ur5e.py)
+
+A full Gymnasium environment where SAC learns the entire control policy from scratch — no PID. This is the most general approach and the hardest to tune.
+
+**State space (35-dim):** end-effector position, current target, error vector, target Cartesian velocity, lookahead error, joint positions and velocities, phase encoding, previous action. The target velocity and lookahead are the key additions that allow the agent to anticipate motion rather than just react to error.
+
+**Action space:** normalised joint velocity commands `[-1, 1]` integrated as position increments (`Δq = a × 0.05 rad/step`), matching how real UR5e controllers operate via `servoj`.
+
+**Reward:**
+```python
+r = exp(-10 · dist)              # dense exponential tracking signal
+  - λ_v · ‖v_ee - v_target‖    # penalise velocity mismatch
+  - λ_s · ‖Δaction‖            # penalise jitter
+  - λ_e · ‖action‖             # penalise effort
+```
+
+
+
+Run it:
+```bash
+python train_ur5e.py --traj circle --steps 500000
+tensorboard --logdir results_ur5e/tb_logs    # monitor at localhost:6006
+python evaluate_ur5e.py
+```
+
+---
+
+## Approach Comparison
+
+| | PID + IK | PID + Residual RL | Full RL (SAC) |
+|---|---|---|---|
+| **Training required** | None | ~300 episodes (~5 min) | 500k+ steps (~hours) |
+| **Singularity handling** | DLS (explicit) | DLS + learned correction | Learned implicitly |
+| **Adapts to model mismatch** | No | Partially | Yes |
+| **Safe by default** | Yes | Yes (PID fallback) | Requires careful tuning |
+| **Generalises to new trajectories** | Yes (analytical) | Limited | Limited |
+
+**The residual approach offers the best practical trade-off**: near-instant training, interpretable failure modes, and measurable improvement over the PID baseline on the same trajectory.
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/<YOUR_USERNAME>/ur5-circular-trajectory.git
-cd ur5-circular-trajectory
+git clone https://github.com/NiccoloVeronese/UR5-Control.git
+cd UR5-Control
+pip install mujoco numpy matplotlib torch stable-baselines3 gymnasium tensorboard
+```
 
-# 2. (Optional) create and activate a virtual environment
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+The UR5e model downloads automatically from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) on first run for Approaches 1 and 2. For Approach 3, place the model at `ur5e/scene.xml`.
 
-# 3. Install dependencies
-pip install mujoco numpy matplotlib
+---
+
+## Repository Structure
+
+```
+UR5-Control/
+├── ur5_circular_trajectory.py   # Approach 1: PID + Jacobian IK
+├── ur5_residual_rl.py           # Approach 2: PID + Residual SAC (self-contained)
+├── envs/
+│   └── ur5e_env.py              # Approach 3: Gymnasium environment
+├── train_ur5e.py                # Approach 3: SAC training script
+├── evaluate_ur5e.py             # Evaluation + plot generation
+├── ur5e/
+│   └── scene.xml                # MuJoCo Menagerie UR5e model (Approach 3)
+└── results_ur5e/                # Saved models, checkpoints, TensorBoard logs
 ```
 
 ---
 
-## Usage
+## Trajectories
 
-```bash
-python ur5_circular_trajectory.py
-```
+All trajectories are analytical functions `p(t) → ℝ³`, not pre-recorded waypoints. This gives exact target velocity via finite differences and trivial lookahead — both critical for feedforward control.
 
-1. Select the trajectory plane from the menu (1 = XY, 2 = XZ, 3 = YZ).
-2. The MuJoCo viewer opens — watch the robot track the circle in real time.
-3. Close the viewer window to stop the simulation and generate the plot.
-4. The plot is displayed and saved as `traiettoria_ur5.png` in the project folder.
-
----
-
-## Configuration
-
-All parameters are at the top of `ur5_circular_trajectory.py`:
-
-| Parameter        | Default              | Description                              |
-|------------------|----------------------|------------------------------------------|
-| `CIRCLE_RADIUS`  | `0.15` m             | Radius of the circular trajectory        |
-| `CIRCLE_CENTER`  | `[0.4, 0.0, 0.5]` m  | Center of the circle in world frame      |
-| `CIRCLE_FREQUENCY` | `0.2` Hz           | How fast the end-effector travels        |
-| `KP`             | `50.0`               | Proportional gain                        |
-| `KI`             | `5.0`                | Integral gain (removes steady-state error)|
-| `KD`             | `2.0`                | Derivative gain (damping)                |
-| `LAMBDA_DLS`     | `5e-3`               | DLS damping factor (singularity handling)|
-| `MAX_JOINT_VEL`  | `2.0` rad/s          | Joint velocity saturation limit          |
-| `I_CLAMP`        | `0.05` m             | Anti-windup clamp on the integral term   |
+| Name | Shape | Frequency | Notes |
+|---|---|---|---|
+| `circle` | Horizontal circle, r = 0.5m | 0.12 Hz | Primary benchmark |
+| `circle_fast` | Smaller circle, r = 0.2m | 0.5 Hz | Tests high-speed tracking |
+| `figure_eight` | 3D lemniscate | 0.2 Hz | Tests non-planar tracking |
 
 ---
 
-## How It Works
+## Evaluation Metrics
 
-### Circular trajectory
-
-The desired position and velocity are computed analytically:
-
-```
-p(t) = center + R · [cos(ωt),  0,  sin(ωt)]   (XZ plane)
-v(t) = dp/dt  = R·ω · [−sin(ωt), 0,  cos(ωt)]
-```
-
-### Cartesian PID
-
-```
-v_cart = v_d + Kp·e + Ki·∫e dt + Kd·ė
-```
-
-### Jacobian IK (Damped Least Squares)
-
-```
-J† = Jᵀ (J Jᵀ + λ²I)⁻¹
-dq = J† · v_cart
-```
-
-Joint positions are updated by integrating `dq` at each timestep.
+| Metric | Description |
+|---|---|
+| Mean L2 error (mm) | Average Euclidean distance between end-effector and target |
+| Steady-state error (mm) | Mean error after the first half of the episode (transient removed) |
+| Max error (mm) | Worst-case deviation |
+| Smoothness | Mean joint jerk (rad/s²) — lower is better |
 
 ---
 
-## Project Structure
+## Design Choices — Short Note
 
-```
-ur5-circular-trajectory/
-├── ur5_circular_trajectory.py   # Main script
-├── README.md                    # This file
-├── .gitignore
-└── mujoco_menagerie/            # Auto-downloaded on first run (git-ignored)
-```
+**Why residual RL over pure RL?** Pure RL on a 6-DOF arm from scratch is a notoriously hard exploration problem, the agent must discover that circular motion is required without any prior. Residual RL sidesteps this by letting the PID solve the easy part, leaving only the correction task for the agent. This reduces sample complexity by roughly an order of magnitude.
+
+**Why SAC?** Continuous control with a smooth action requirement. SAC's entropy regularisation naturally encourages smooth, exploratory policies and its off-policy replay buffer is sample-efficient. PPO (on-policy) would require far more environment steps.
+
+**Why include velocity in the state?** A position-only error signal allows the agent to learn a policy that minimises instantaneous distance without caring about direction of motion. Including `v_target` in the observation forces the agent to match not just where to be, but how fast to move there — the difference between hovering near the circle and actually tracking it.
+
+**Why not use `progress = prev_dist - dist` in the reward?** This term oscillates in sign every step whenever the agent is near the trajectory, creating a reward signal that actively destabilises learning. The agent discovers it can collect repeated positive progress signals by oscillating in place near the closest point on the circle — a degenerate strategy that scores well but tracks nothing.
 
 ---
 
 ## License
 
-MIT License — feel free to use, modify, and distribute.
+MIT
