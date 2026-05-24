@@ -153,6 +153,31 @@ All trajectories are analytical functions `p(t) → ℝ³`, not pre-recorded way
 ---
 
 ## Design Choices — Short Note
+The reward at each step is:
+
+```
+r = − ‖pos_error‖          (tracking accuracy, primary term)
+  − 0.01 · ‖action‖²       (action smoothness regularisation)
+  + 0.5  · 𝟙[‖error‖ < 5mm] (precision bonus)
+```
+
+- The **accuracy term** directly penalises distance from the target at every step, giving a dense learning signal throughout the trajectory.
+- The **smoothness term** penalises large RL corrections, discouraging jittery behaviour and keeping the agent from fighting the PID.
+- The **precision bonus** provides a shaped incentive to get within 5 mm of the target, avoiding the sparse-reward problem near convergence.
+
+---
+
+### Algorithm: Soft Actor-Critic (SAC)
+
+SAC is chosen for three reasons relevant to this task:
+
+1. **Sample efficiency** — off-policy learning from a replay buffer reuses past experience, important given the simulation cost per step.
+2. **Stability** — the entropy regularisation prevents the policy from collapsing to deterministic actions prematurely, which is a common failure mode in continuous control.
+3. **Adaptive temperature** — the entropy coefficient `α` is tuned automatically to match a target entropy of `−dim(action) = −3`, removing a sensitive hyperparameter.
+
+The critic is a twin Q-network (clipped double-Q) to reduce overestimation bias. The target critic is updated via Polyak averaging (`τ = 0.005`).
+
+**Network architecture** — both actor and critic use two-hidden-layer MLPs with 128 units and ReLU activations. The actor outputs a mean and log-standard-deviation; actions are sampled via the reparametrisation trick and squashed through `tanh`.
 
 **Why residual RL over pure RL?** Pure RL on a 6-DOF arm from scratch is a notoriously hard exploration problem, the agent must discover that circular motion is required without any prior. Residual RL sidesteps this by letting the PID solve the easy part, leaving only the correction task for the agent. This reduces sample complexity by roughly an order of magnitude.
 
