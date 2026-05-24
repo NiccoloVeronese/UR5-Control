@@ -1,9 +1,8 @@
 """
 evaluate_ur5e.py
 ----------------
-Valuta il modello UR5e trained e genera plot.
 
-Esegui:
+Run:
     python evaluate_ur5e.py
     python evaluate_ur5e.py --traj figure_eight
 """
@@ -55,7 +54,7 @@ def plot_results(ee_pos, target_pos, errors, rewards, save_path, traj_name):
     ax3d.set_xlabel("X (m)"); ax3d.set_ylabel("Y (m)"); ax3d.set_zlabel("Z (m)")
     ax3d.set_title("3D trajectory overlay"); ax3d.legend(fontsize=8)
 
-    # Errore nel tempo
+    # Error Over Time
     ax_err = fig.add_subplot(gs[0, 1])
     ax_err.plot(t, errors, color="#E85D24", lw=1.2)
     ax_err.axhline(np.mean(errors), color="gray", ls="--", lw=1,
@@ -64,7 +63,7 @@ def plot_results(ee_pos, target_pos, errors, rewards, save_path, traj_name):
     ax_err.set_xlabel("Step"); ax_err.set_ylabel("L2 error (m)")
     ax_err.set_title("Tracking error over time"); ax_err.legend(); ax_err.grid(alpha=0.3)
 
-    # Proiezione XY
+    # XY Projection
     ax_xy = fig.add_subplot(gs[1, 0])
     ax_xy.plot(target_pos[:,0], target_pos[:,1], "b--", alpha=0.7, label="Target")
     ax_xy.plot(ee_pos[:,0], ee_pos[:,1], "r-", alpha=0.85, label="End-effector")
@@ -111,7 +110,7 @@ def main():
     env   = UR5eTrackerEnv(trajectory=args.traj)
     model = SAC.load(model_path, env=env)
 
-    print("Eseguendo episodio di valutazione...")
+    print("Running evaluation episode...")
     ee_pos, target_pos, errors, rewards = run_episode(model, env)
 
     os.makedirs(results_dir, exist_ok=True)
