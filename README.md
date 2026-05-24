@@ -89,7 +89,7 @@ python ur5_residual_rl.py
 
 | | Full RL (SAC) | PID + IK | PID + Residual RL |
 |---|---|---|---|
-| **Training required** | 500k+ steps (~hours) | None | ~300 episodes (~5 min) |
+| **Training required** | 300k+ steps (~hours) | None | ~300 episodes (~5 min) |
 | **Singularity handling** | Learned implicitly | DLS (explicit) | DLS + learned correction |
 | **Adapts to model mismatch** | Yes | No | Partially |
 | **Safe by default** | Requires careful tuning | Yes | Yes (PID fallback) |
