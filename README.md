@@ -87,13 +87,14 @@ python ur5_residual_rl.py
 
 ## Approach Comparison
 
-| | PID + IK | PID + Residual RL | Full RL (SAC) |
+| | Full RL (SAC) | PID + IK | PID + Residual RL |
 |---|---|---|---|
-| **Training required** | None | ~300 episodes (~5 min) | 500k+ steps (~hours) |
-| **Singularity handling** | DLS (explicit) | DLS + learned correction | Learned implicitly |
-| **Adapts to model mismatch** | No | Partially | Yes |
-| **Safe by default** | Yes | Yes (PID fallback) | Requires careful tuning |
-| **Generalises to new trajectories** | Yes (analytical) | Limited | Limited |
+| **Training required** | 500k+ steps (~hours) | None | ~300 episodes (~5 min) |
+| **Singularity handling** | Learned implicitly | DLS (explicit) | DLS + learned correction |
+| **Adapts to model mismatch** | Yes | No | Partially |
+| **Safe by default** | Requires careful tuning | Yes | Yes (PID fallback) |
+| **Generalises to new trajectories** | Limited | Yes (analytical) | Limited |
+
 
 **The residual approach offers the best practical trade-off**: near-instant training, interpretable failure modes, and measurable improvement over the PID baseline on the same trajectory.
 
