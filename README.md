@@ -116,14 +116,14 @@ The UR5e model downloads automatically from [MuJoCo Menagerie](https://github.co
 
 ```
 UR5-Control/
-├── ur5_circular_trajectory.py   # Approach 1: PID + Jacobian IK
-├── ur5_residual_rl.py           # Approach 2: PID + Residual SAC (self-contained)
+├── ur5_circular_trajectory.py   # Approach 2: PID + Jacobian IK
+├── ur5_residual_rl.py           # Approach 3: PID + Residual SAC (self-contained)
 ├── envs/
-│   └── ur5e_env.py              # Approach 3: Gymnasium environment
-├── train_ur5e.py                # Approach 3: SAC training script
+│   └── ur5e_env.py              # Approach 1: Gymnasium environment
+├── train_ur5e.py                # Approach 1: SAC training script
 ├── evaluate_ur5e.py             # Evaluation + plot generation
 ├── ur5e/
-│   └── scene.xml                # MuJoCo Menagerie UR5e model (Approach 3)
+│   └── scene.xml                # MuJoCo Menagerie UR5e model (Approach 1)
 └── results_ur5e/                # Saved models, checkpoints, TensorBoard logs
 ```
 
