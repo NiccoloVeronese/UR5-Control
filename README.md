@@ -11,9 +11,9 @@ Trajectory tracking is harder than point reaching. The end-effector must not jus
 ---
 
 ## Three Approaches
-### Approach 1 — Full RL (SAC, Gymnasium env) [`envs/ur5e_env.py`](envs/ur5e_env.py) + [`train_ur5e.py`](train_ur5e.py) + [`evaluate_ur5e.py`](evaluate_ur5e.py)
+### Approach 1 — Full RL (SAC) [`envs/ur5e_env.py`](envs/ur5e_env.py) + [`train_ur5e.py`](train_ur5e.py) + [`evaluate_ur5e.py`](evaluate_ur5e.py)
 
-A full Gymnasium environment where SAC learns the entire control policy from scratch — no PID. This is the most general approach and the hardest to tune.
+Environment where SAC learns the entire control policy from scratch to track the circular trajectory. Implemented using MuJoCo and Gymnasium.
 
 **State space (35-dim):** end-effector position, current target, error vector, target Cartesian velocity, lookahead error, joint positions and velocities, phase encoding, previous action. The target velocity and lookahead are the key additions that allow the agent to anticipate motion rather than just react to error.
 
@@ -31,7 +31,7 @@ r = exp(-10 · dist)              # dense exponential tracking signal
 
 Run it:
 ```bash
-python train_ur5e.py --traj circle --steps 500000
+python train_ur5e.py --traj circle --steps 300000
 tensorboard --logdir results_ur5e/tb_logs    # monitor at localhost:6006
 python evaluate_ur5e.py
 ```
@@ -89,7 +89,7 @@ python ur5_residual_rl.py
 
 | | Full RL (SAC) | PID + IK | PID + Residual RL |
 |---|---|---|---|
-| **Training required** | 500k+ steps (~hours) | None | ~300 episodes (~5 min) |
+| **Training required** | 300k+ steps (~hours) | None | ~300 episodes (~5 min) |
 | **Singularity handling** | Learned implicitly | DLS (explicit) | DLS + learned correction |
 | **Adapts to model mismatch** | Yes | No | Partially |
 | **Safe by default** | Requires careful tuning | Yes | Yes (PID fallback) |
