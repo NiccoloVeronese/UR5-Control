@@ -11,54 +11,7 @@ Trajectory tracking is harder than point reaching. The end-effector must not jus
 ---
 
 ## Three Approaches
-
-### Approach 1 — PID + Jacobian IK [`ur5_circular_trajectory.py`](ur5_circular_trajectory.py)
-
-A classical control baseline. A Cartesian-space PID outputs a desired velocity, which is mapped to joint velocities via a Damped Least Squares Jacobian pseudo-inverse:
-
-```
-v_cart = v_desired + Kp·e + Ki·∫e dt + Kd·ė
-dq     = J†(q) · v_cart          (DLS pseudo-inverse)
-```
-
-**Strengths:** No training required, interpretable, numerically stable near singularities (DLS handles them gracefully), real-time capable.
-
-**Limitations:** Fixed gains — performance degrades at higher frequencies. Integral windup even with clamping. Cannot adapt to model mismatch or unmodelled dynamics.
-
-Run it:
-```bash
-python ur5_circular_trajectory.py
-# Interactive menu: select XY / XZ / YZ plane
-```
-
----
-
-### Approach 2 — PID + Residual SAC [`ur5_residual_rl.py`](ur5_residual_rl.py)
-
-The key insight motivating this approach: **pure RL from scratch on a 6-DOF arm is a hard exploration problem**. Instead of replacing the PID, a SAC agent learns to *correct* the residual errors the PID cannot eliminate:
-
-```
-v_cart = v_pid(t)  +  α · v_rl(observation)
-```
-
-where `α = 0.3` controls how much authority the RL agent has. This architecture:
-- Provides a warm start — the PID already gets the arm near the circle
-- Narrows the learning problem to residual correction (small action space)
-- Guarantees graceful degradation: if RL fails, the PID still tracks
-
-The agent observes `[pos_error(3), vel_error(3), sin(ωt), cos(ωt)]` — an 8-dimensional state focused on what matters for correction. A warmup of 800 steps per episode lets the PID stabilise before RL starts collecting data, preventing large transient errors from corrupting the replay buffer.
-
-Run it:
-```bash
-python ur5_residual_rl.py
-# Mode [1] Train  — 300 episodes, no viewer, fast
-# Mode [2] Demo   — load saved policy, open viewer
-# Mode [3] Baseline — PID only with viewer, for comparison
-```
-
----
-
-### Approach 3 — Full RL (SAC, Gymnasium env) [`envs/ur5e_env.py`](envs/ur5e_env.py) + [`train_ur5e.py`](train_ur5e.py)
+### Approach 1 — Full RL (SAC, Gymnasium env) [`envs/ur5e_env.py`](envs/ur5e_env.py) + [`train_ur5e.py`](train_ur5e.py) + [`evaluate_ur5e.py`](evaluate_ur5e.py)
 
 A full Gymnasium environment where SAC learns the entire control policy from scratch — no PID. This is the most general approach and the hardest to tune.
 
@@ -84,6 +37,53 @@ python evaluate_ur5e.py
 ```
 
 ---
+### Approach 2 — PID + Jacobian IK [`ur5_circular_trajectory.py`](ur5_circular_trajectory.py)
+
+A classical control baseline. A Cartesian-space PID outputs a desired velocity, which is mapped to joint velocities via a Damped Least Squares Jacobian pseudo-inverse:
+
+```
+v_cart = v_desired + Kp·e + Ki·∫e dt + Kd·ė
+dq     = J†(q) · v_cart          (DLS pseudo-inverse)
+```
+
+**Strengths:** No training required, interpretable, numerically stable near singularities (DLS handles them gracefully), real-time capable.
+
+**Limitations:** Fixed gains — performance degrades at higher frequencies. Integral windup even with clamping. Cannot adapt to model mismatch or unmodelled dynamics.
+
+Run it:
+```bash
+python ur5_circular_trajectory.py
+# Interactive menu: select XY / XZ / YZ plane
+```
+
+---
+
+### Approach 3 — PID + Residual SAC [`ur5_residual_rl.py`](ur5_residual_rl.py)
+
+The key insight motivating this approach: **pure RL from scratch on a 6-DOF arm is a hard exploration problem**. Instead of replacing the PID, a SAC agent learns to *correct* the residual errors the PID cannot eliminate:
+
+```
+v_cart = v_pid(t)  +  α · v_rl(observation)
+```
+
+where `α = 0.3` controls how much authority the RL agent has. This architecture:
+- Provides a warm start — the PID already gets the arm near the circle
+- Narrows the learning problem to residual correction (small action space)
+- Guarantees graceful degradation: if RL fails, the PID still tracks
+
+The agent observes `[pos_error(3), vel_error(3), sin(ωt), cos(ωt)]` — an 8-dimensional state focused on what matters for correction. A warmup of 800 steps per episode lets the PID stabilise before RL starts collecting data, preventing large transient errors from corrupting the replay buffer.
+
+Run it:
+```bash
+python ur5_residual_rl.py
+# Mode [1] Train  — 300 episodes, no viewer, fast
+# Mode [2] Demo   — load saved policy, open viewer
+# Mode [3] Baseline — PID only with viewer, for comparison
+```
+
+---
+
+
 
 ## Approach Comparison
 
